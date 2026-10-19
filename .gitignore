@@ -1,0 +1,5 @@
+# Служебные папки IDE и агента
+.idea/
+.veai/
+.aiforopenide/
+.tasks/
