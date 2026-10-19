@@ -215,6 +215,7 @@ function route() {
   if (p0 === 'w' && p1) return renderWorkout(p1);
   if (p0 === 'exercises') return renderExercises();
   if (p0 === 'exercise' && p1) return renderExercise(p1);
+  if (p0 === 'stats') return renderStats();
   if (p0 === 'settings') return renderSettings();
   renderWorkouts();
 }
@@ -497,6 +498,8 @@ function renderExercises() {
 
 /* ================= Экран: история упражнения ================= */
 
+let exChartMode = 'w';
+
 function renderExercise(name) {
   setTab('exercises');
   const e = exerciseIndex().get(keyOf(name));
@@ -507,9 +510,28 @@ function renderExercise(name) {
   const best = bestSet(all);
   const e1s = all.map(e1rm).filter(Boolean);
   const best1rm = e1s.length ? Math.max(...e1s) : null;
-  const pts = [...e.entries].reverse()
-    .map(x => ({ date: x.workout.date, v: maxWeight(x.sets) }))
-    .filter(p => p.v !== null);
+  const chron = [...e.entries].reverse();
+  const series = {
+    w: chron.map(x => ({ date: x.workout.date, v: maxWeight(x.sets) })).filter(p => p.v !== null),
+    e: chron.map(x => {
+      const v = x.sets.map(e1rm).filter(Boolean);
+      return { date: x.workout.date, v: v.length ? Math.round(Math.max(...v) * 10) / 10 : null };
+    }).filter(p => p.v !== null),
+  };
+  const modes = ['w', 'e'].filter(m => series[m].length >= 2);
+
+  const chartHtml = () => {
+    if (!modes.length) return '';
+    const m = modes.includes(exChartMode) ? exChartMode : modes[0];
+    const seg = modes.length > 1
+      ? `<div class="seg">${[['w', 'Макс. вес'], ['e', 'Расч. 1ПМ']].map(([k, l]) =>
+          `<button data-chart="${k}" class="${k === m ? 'on' : ''}">${l}</button>`).join('')}</div>`
+      : '';
+    const caption = m === 'w'
+      ? 'Максимальный вес по тренировкам, кг'
+      : 'Расчётный 1ПМ по тренировкам, кг — учитывает и вес, и повторы';
+    return `<div class="card" id="chartCard">${seg}<div class="muted">${caption}</div>${chartSvg(series[m])}</div>`;
+  };
 
   view.innerHTML = `
     <div class="stats">
@@ -517,13 +539,20 @@ function renderExercise(name) {
       <div class="stat"><div class="stat-v">${best1rm ? fmtNum(Math.round(best1rm * 10) / 10) : '—'}</div><div class="stat-l">Расч. 1ПМ, кг</div></div>
       <div class="stat"><div class="stat-v">${e.entries.length}</div><div class="stat-l">Тренировок</div></div>
     </div>
-    ${pts.length >= 2 ? `<div class="card"><div class="muted">Максимальный вес по тренировкам, кг</div>${chartSvg(pts)}</div>` : ''}
+    ${chartHtml()}
     <h2 class="month">История</h2>
     ${e.entries.map(x => `
       <a class="card" href="#/w/${x.workout.id}">
         <div class="card-title">${esc(fmtDate(x.workout.date))}</div>
         <div class="chips">${x.sets.map(s => `<span class="chip ${s === best ? 'pr' : ''}">${esc(setLabel(s))}</span>`).join('')}</div>
       </a>`).join('')}`;
+
+  view.onclick = ev => {
+    const b = ev.target.closest('[data-chart]');
+    if (!b) return;
+    exChartMode = b.dataset.chart;
+    $('#chartCard').outerHTML = chartHtml();
+  };
 
   $('#renameEx').onclick = () => {
     const nn = prompt('Новое название (изменится во всех тренировках). Если такое упражнение уже есть — записи объединятся.', e.name);
@@ -555,6 +584,231 @@ function chartSvg(pts) {
     <text x="${L}" y="${H - 5}">${fmtDateShort(pts[0].date)}</text>
     <text x="${W - R}" y="${H - 5}" text-anchor="end">${fmtDateShort(pts[pts.length - 1].date)}</text>
   </svg>`;
+}
+
+/* ================= Экран: статистика ================= */
+
+let statsMonth = todayISO().slice(0, 7);
+let statsPeriod = 90;
+
+const DAY_MS = 864e5;
+const pad2 = n => String(n).padStart(2, '0');
+const isoOf = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+function addDays(iso, n) {
+  const d = parseISO(iso);
+  d.setDate(d.getDate() + n);
+  return isoOf(d);
+}
+/** Понедельник недели, в которую попадает дата. */
+function weekStart(iso) {
+  const d = parseISO(iso);
+  d.setDate(d.getDate() - (d.getDay() + 6) % 7);
+  return isoOf(d);
+}
+const weeksBetween = (a, b) => Math.round((parseISO(b) - parseISO(a)) / (7 * DAY_MS));
+
+function plural(n, one, few, many) {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) return few;
+  return many;
+}
+
+const visitWorkouts = () => db.workouts.filter(w => w.exercises.length);
+
+/** Походы в зал считаются по дням: две тренировки в один день — один поход. */
+function visitStats() {
+  const days = [...new Set(visitWorkouts().map(w => w.date))].sort();
+  const res = { total: days.length, week: 0, month: 0, avg: 0, streak: 0, bestStreak: 0 };
+  if (!days.length) return res;
+
+  const today = todayISO();
+  const thisWeek = weekStart(today);
+  res.week = days.filter(d => d >= thisWeek && d <= addDays(thisWeek, 6)).length;
+  res.month = days.filter(d => d.startsWith(today.slice(0, 7))).length;
+
+  // Среднее за последние 13 недель (или с первой тренировки, если она была позже)
+  const span = Math.max(1, Math.min(13, weeksBetween(weekStart(days[0]), thisWeek) + 1));
+  const from = addDays(thisWeek, -7 * (span - 1));
+  res.avg = days.filter(d => d >= from && d <= addDays(thisWeek, 6)).length / span;
+
+  // Серия недель подряд хотя бы с одним походом; текущая неделя без похода серию ещё не обрывает
+  const weeks = new Set(days.map(weekStart));
+  let wk = weeks.has(thisWeek) ? thisWeek : addDays(thisWeek, -7);
+  while (weeks.has(wk)) { res.streak++; wk = addDays(wk, -7); }
+
+  let run = 0, prev = null;
+  for (const w of [...weeks].sort()) {
+    run = prev && weeksBetween(prev, w) === 1 ? run + 1 : 1;
+    res.bestStreak = Math.max(res.bestStreak, run);
+    prev = w;
+  }
+  return res;
+}
+
+/** Чем сравнивать результаты упражнения: 1ПМ (вес+повторы), вес или повторы (без веса). */
+function scoreKind(sets) {
+  if (sets.some(s => e1rm(s))) return 'e';
+  if (sets.some(s => s.w !== null)) return 'w';
+  return 'r';
+}
+
+function topSet(sets, kind) {
+  const val = s => kind === 'e' ? e1rm(s) : kind === 'w' ? s.w : s.r;
+  let best = null, bv = null;
+  for (const s of sets) {
+    const v = val(s);
+    if (v && (bv === null || v > bv)) { best = s; bv = v; }
+  }
+  return best && { set: best, v: bv };
+}
+
+/** Изменение результата: начало периода (или первая тренировка в нём) против последней тренировки. */
+function progressList(days) {
+  const start = addDays(todayISO(), -days);
+  const out = [];
+  for (const e of exerciseIndex().values()) {
+    const chron = [...e.entries].reverse();
+    const kind = scoreKind(chron.flatMap(x => x.sets));
+    const scored = chron.map(x => ({ x, t: topSet(x.sets, kind) })).filter(p => p.t);
+    if (scored.length < 2) continue;
+    const cur = scored[scored.length - 1];
+    if (cur.x.workout.date < start) continue;
+    let base = null;
+    for (const p of scored) {
+      if (p.x.workout.date <= start) base = p; else break;
+    }
+    base = base || scored[0];
+    if (base === cur) continue;
+    out.push({ name: e.name, base, cur, pct: (cur.t.v - base.t.v) / base.t.v * 100 });
+  }
+  return out.sort((a, b) => b.pct - a.pct);
+}
+
+/** Личные рекорды по весу (для упражнений без веса — по повторам), от новых к старым. */
+function recentRecords(limit = 5) {
+  const recs = [];
+  for (const e of exerciseIndex().values()) {
+    const chron = [...e.entries].reverse();
+    const kind = scoreKind(chron.flatMap(x => x.sets)) === 'r' ? 'r' : 'w';
+    let best = null;
+    for (const x of chron) {
+      const t = topSet(x.sets, kind);
+      if (!t) continue;
+      if (best && t.v > best.v) recs.push({ name: e.name, workout: x.workout, set: t.set, prev: best.set });
+      if (!best || t.v > best.v) best = t;
+    }
+  }
+  return recs.sort((a, b) => byDateDesc(a.workout, b.workout)).slice(0, limit);
+}
+
+function calendarHtml() {
+  const [y, m] = statsMonth.split('-').map(Number);
+  const byDay = new Map();
+  for (const w of visitWorkouts()) {
+    if (!w.date.startsWith(statsMonth)) continue;
+    if (!byDay.has(w.date)) byDay.set(w.date, []);
+    byDay.get(w.date).push(w);
+  }
+  const offset = (new Date(y, m - 1, 1).getDay() + 6) % 7;
+  const daysInMonth = new Date(y, m, 0).getDate();
+  const today = todayISO();
+
+  let cells = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'].map(d => `<div class="cal-wd">${d}</div>`).join('');
+  cells += '<div></div>'.repeat(offset);
+  for (let d = 1; d <= daysInMonth; d++) {
+    const iso = `${statsMonth}-${pad2(d)}`;
+    const cls = iso === today ? ' today' : '';
+    cells += byDay.has(iso)
+      ? `<button class="cal-day has${cls}" data-act="day" data-date="${iso}">${d}</button>`
+      : `<div class="cal-day${cls}">${d}</div>`;
+  }
+
+  const n = byDay.size;
+  const isCurrent = statsMonth >= today.slice(0, 7);
+  return `<div class="card">
+    <div class="cal-head">
+      <button class="icon-btn" data-act="month" data-d="-1" aria-label="Предыдущий месяц">‹</button>
+      <div class="cal-title">${esc(monthLabel(statsMonth + '-01'))}
+        <div class="muted">${n} ${plural(n, 'поход', 'похода', 'походов')}</div></div>
+      <button class="icon-btn" data-act="month" data-d="1" aria-label="Следующий месяц" ${isCurrent ? 'disabled' : ''}>›</button>
+    </div>
+    <div class="cal">${cells}</div>
+  </div>`;
+}
+
+function progressRowHtml(p) {
+  const pct = Math.round(p.pct);
+  const cls = pct > 0 ? 'up' : pct < 0 ? 'down' : '';
+  return `<a class="prog-row" href="#/exercise/${encodeURIComponent(p.name)}">
+    <div><div class="prog-name">${esc(p.name)}</div>
+      <div class="muted">${esc(setLabel(p.base.t.set))} → ${esc(setLabel(p.cur.t.set))}</div></div>
+    <div class="prog-pct ${cls}">${pct > 0 ? '+' : ''}${pct}%</div>
+  </a>`;
+}
+
+function recordRowHtml(r) {
+  return `<a class="prog-row" href="#/w/${r.workout.id}">
+    <div><div class="prog-name">🏆 ${esc(r.name)}</div>
+      <div class="muted">${esc(fmtDateShort(r.workout.date))} · было ${esc(setLabel(r.prev))}</div></div>
+    <div class="prog-pct up">${esc(setLabel(r.set))}</div>
+  </a>`;
+}
+
+function renderStats() {
+  setTab('stats');
+  setHeader('Статистика', null);
+
+  const stat = (v, l) => `<div class="stat"><div class="stat-v">${esc(v)}</div><div class="stat-l">${esc(l)}</div></div>`;
+
+  const draw = () => {
+    const v = visitStats();
+    if (!v.total) {
+      view.innerHTML = `<div class="empty">Здесь появится статистика,<br>когда вы запишете первую тренировку</div>`;
+      return;
+    }
+    const prog = progressList(statsPeriod);
+    const recs = recentRecords();
+    view.innerHTML = `
+      <h2 class="month">Походы в зал</h2>
+      <div class="stats two">
+        ${stat(v.week, 'на этой неделе')}
+        ${stat(v.month, 'в этом месяце')}
+        ${stat(fmtNum(Math.round(v.avg * 10) / 10), 'в среднем в неделю')}
+        ${stat(v.streak, `${plural(v.streak, 'неделя', 'недели', 'недель')} подряд · рекорд ${v.bestStreak}`)}
+      </div>
+      ${calendarHtml()}
+
+      <h2 class="month">Прогресс</h2>
+      <div class="seg">${[[30, 'Месяц'], [90, '3 месяца'], [365, 'Год']].map(([d, l]) =>
+        `<button data-act="period" data-p="${d}" class="${d === statsPeriod ? 'on' : ''}">${l}</button>`).join('')}</div>
+      ${prog.length
+        ? `<div class="card list">${prog.map(progressRowHtml).join('')}</div>
+           <div class="footnote">Начало периода против последней тренировки. % — по расчётному 1ПМ, он учитывает и вес, и повторы.</div>`
+        : `<div class="empty small">Нужно хотя бы две тренировки с одним упражнением, и последняя — в выбранном периоде</div>`}
+
+      ${recs.length ? `<h2 class="month">Последние рекорды</h2><div class="card list">${recs.map(recordRowHtml).join('')}</div>` : ''}`;
+  };
+  draw();
+
+  view.onclick = e => {
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    const act = b.dataset.act;
+    if (act === 'period') {
+      statsPeriod = +b.dataset.p;
+      draw();
+    } else if (act === 'month') {
+      const [y, m] = statsMonth.split('-').map(Number);
+      statsMonth = isoOf(new Date(y, m - 1 + Number(b.dataset.d), 1)).slice(0, 7);
+      draw();
+    } else if (act === 'day') {
+      const list = sortedWorkouts().filter(w => w.date === b.dataset.date && w.exercises.length);
+      if (list.length === 1) { location.hash = '#/w/' + list[0].id; return; }
+      openModal(`<div class="sheet-title">${esc(fmtDate(b.dataset.date))}</div>` +
+        list.map(w => `<a class="card" href="#/w/${w.id}"><div class="muted">${esc(w.exercises.map(x => x.name).join(' · '))}</div></a>`).join(''));
+    }
+  };
 }
 
 /* ================= Экран: настройки / резервная копия ================= */
