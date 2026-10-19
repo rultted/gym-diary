@@ -180,8 +180,12 @@ function repeatWorkout(src) {
 
 /* ================= Каркас UI ================= */
 
+let currentBack = null;
+
 function setHeader(title, backHash, rightHtml = '') {
-  $('#title').textContent = title;
+  const t = $('#title');
+  if (t.textContent !== title) { t.textContent = title; restartAnim(t, 'tfade'); }
+  currentBack = backHash;
   const b = $('#backBtn');
   b.hidden = !backHash;
   b.onclick = () => { location.hash = backHash; };
@@ -192,32 +196,237 @@ function setTab(tab) {
   document.querySelectorAll('#tabbar a').forEach(a => a.classList.toggle('active', a.dataset.tab === tab));
 }
 
+let modalTimer = 0;
+
 function openModal(html, { top = false } = {}) {
+  clearTimeout(modalTimer);
   const m = $('#modal');
   m.className = top ? 'top' : '';
   m.innerHTML = `<div class="sheet">${html}</div>`;
   m.hidden = false;
+  void m.offsetWidth; // стартовое положение за краем экрана, затем выезд
+  m.classList.add('open');
   m.onclick = e => { if (e.target === m) closeModal(); };
   return $('.sheet', m);
 }
 
-function closeModal() {
+function closeModal(instant = false) {
   const m = $('#modal');
-  m.hidden = true;
-  m.innerHTML = '';
+  if (m.hidden) return;
+  m.classList.remove('open');
+  clearTimeout(modalTimer);
+  const done = () => { m.hidden = true; m.innerHTML = ''; };
+  if (instant || reduceMotion) done(); else modalTimer = setTimeout(done, 280);
 }
 
+/* ================= Анимации ================= */
+
+const reduceMotion = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+const EASE = 'cubic-bezier(.2,.8,.2,1)';
+const ANIM_CLASSES = ['in-r', 'in-l', 'in-f', 'full'];
+
+/** Появление блока: from = 'r' (справа), 'l' (слева), 'f' (плавно). full — въезд на всю ширину (после свайпа). */
+function animateIn(el, from = 'f', full = false) {
+  if (!el) return;
+  el.classList.remove(...ANIM_CLASSES);
+  el.style.transition = '';
+  el.style.transform = '';
+  void el.offsetWidth;
+  el.classList.add('in-' + from);
+  if (full) el.classList.add('full');
+  const done = e => {
+    if (e.target !== el) return;
+    el.classList.remove(...ANIM_CLASSES);
+    el.removeEventListener('animationend', done);
+  };
+  el.addEventListener('animationend', done);
+}
+
+function restartAnim(el, cls) {
+  el.classList.remove(cls);
+  void el.offsetWidth;
+  el.classList.add(cls);
+}
+
+/** Подсветить появление последнего элемента (новый подход / упражнение). */
+function popLast(root, sel) {
+  const els = root ? root.querySelectorAll(sel) : [];
+  if (els.length) els[els.length - 1].classList.add('pop');
+}
+
+/** Цифры «набегают» от 0 до значения из data-count. */
+function countUp(root) {
+  if (reduceMotion) return;
+  root.querySelectorAll('[data-count]').forEach(el => {
+    const target = Number(el.dataset.count);
+    if (!target) return;
+    const dec = target % 1 ? 1 : 0, f = 10 ** dec, t0 = performance.now(), dur = 650;
+    const final = el.textContent;
+    let finished = false;
+    el.textContent = '0';
+    const step = now => {
+      if (finished) return;
+      const p = Math.min(1, (now - t0) / dur), k = 1 - (1 - p) ** 3;
+      el.textContent = p < 1 ? fmtNum(Math.round(target * k * f) / f) : final;
+      if (p < 1) requestAnimationFrame(step); else finished = true;
+    };
+    requestAnimationFrame(step);
+    // Страховка: если анимация приостановилась (фон, экономия заряда) — ставим итоговое значение
+    setTimeout(() => { finished = true; el.textContent = final; }, dur + 150);
+  });
+}
+
+/** Переключатель с ездящей плашкой. items: [[значение, подпись], ...] */
+function segHtml(items, cur, attr) {
+  const i = Math.max(0, items.findIndex(([k]) => String(k) === String(cur)));
+  return `<div class="seg" style="--n:${items.length};--i:${i}"><span class="seg-ind"></span>${items.map(([k, l], j) =>
+    `<button data-${attr}="${k}" class="${j === i ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+}
+
+function segSelect(btn) {
+  const seg = btn.parentElement;
+  const btns = [...seg.querySelectorAll('button')];
+  btns.forEach(b => b.classList.toggle('on', b === btn));
+  seg.style.setProperty('--i', btns.indexOf(btn));
+}
+
+/* ================= Свайпы ================= */
+
+const TABS = [['workouts', '#/'], ['exercises', '#/exercises'], ['stats', '#/stats'], ['settings', '#/settings']];
+const tabIdx = tab => TABS.findIndex(t => t[0] === tab);
+
+let pageSwipe = null;   // свайп экрана: соседние вкладки или «назад»
+let innerSwipe = null;  // свайп внутри экрана (календарь): { area, body, can(dir), go(dir) }
+let swipeNav = false;   // переход сделан свайпом — новый экран въезжает целиком
+let gesture = null;
+
+function navigate(hash) {
+  if (location.hash === hash) route(); else location.hash = hash;
+}
+
+function slideX(el, x, after) {
+  el.style.transition = reduceMotion ? 'none' : `transform .2s ${EASE}`;
+  el.style.transform = x ? `translateX(${x}px)` : '';
+  setTimeout(() => {
+    if (after) after(); else el.style.transition = '';
+  }, reduceMotion ? 0 : 200);
+}
+
+document.addEventListener('touchstart', e => {
+  gesture = null;
+  if (e.touches.length !== 1) return;
+  const target = e.target;
+  if (target === document.activeElement && /^(INPUT|TEXTAREA)$/.test(target.tagName)) return;
+  const t = e.touches[0];
+  const g = { x0: t.clientX, y0: t.clientY, t0: e.timeStamp, axis: null, dx: 0, dy: 0 };
+  const modal = $('#modal');
+
+  if (!modal.hidden) {
+    // Шторку можно смахнуть: нижнюю — вниз, верхнюю (выбор упражнения) — вверх
+    const sheet = target.closest('.sheet');
+    if (!sheet || !modal.classList.contains('open')) return;
+    g.top = modal.classList.contains('top');
+    if (g.top ? target.closest('.sug') : sheet.scrollTop > 0) return;
+    Object.assign(g, { kind: 'sheet', el: sheet });
+  } else if (innerSwipe && target.closest(innerSwipe.area)) {
+    Object.assign(g, { kind: 'x', el: $(innerSwipe.body), sw: innerSwipe });
+  } else if (pageSwipe && !target.closest('#topbar, #tabbar')) {
+    Object.assign(g, { kind: 'x', el: view, sw: pageSwipe });
+  } else return;
+
+  if (g.el) gesture = g;
+}, { passive: true });
+
+document.addEventListener('touchmove', e => {
+  const g = gesture;
+  if (!g || e.touches.length !== 1) return;
+  const t = e.touches[0];
+  const dx = t.clientX - g.x0, dy = t.clientY - g.y0;
+  const s = g.top ? -1 : 1;
+
+  if (!g.axis) {
+    if (Math.abs(dx) < 10 && Math.abs(dy) < 10) return;
+    g.axis = Math.abs(dx) > Math.abs(dy) * 1.2 ? 'x' : 'y';
+    const wrong = g.kind === 'x' ? g.axis !== 'x' : (g.axis !== 'y' || dy * s < 0);
+    if (wrong) { gesture = null; return; }   // обычная прокрутка
+    g.el.style.transition = 'none';
+  }
+  if (e.cancelable) e.preventDefault();
+
+  if (g.kind === 'x') {
+    const dir = dx < 0 ? 1 : -1;
+    g.dx = g.sw.can(dir) ? dx : dx * 0.25;     // «резинка», если дальше идти некуда
+    g.el.style.transform = `translateX(${g.dx}px)`;
+  } else {
+    const d = dy * s;
+    g.dy = d > 0 ? d : d * 0.2;
+    g.el.style.transform = `translateY(${g.dy * s}px)`;
+  }
+}, { passive: false });
+
+function endGesture(e, cancelled) {
+  const g = gesture;
+  gesture = null;
+  if (!g || !g.axis) return;
+  const dt = Math.max(1, e.timeStamp - g.t0);
+
+  if (g.kind === 'x') {
+    const dir = g.dx < 0 ? 1 : -1;
+    const dist = Math.abs(g.dx), w = g.el.offsetWidth || window.innerWidth;
+    const ok = !cancelled && g.sw.can(dir) && (dist > w * 0.28 || (dist > 40 && dist / dt > 0.45));
+    if (ok) slideX(g.el, -dir * w, () => g.sw.go(dir));
+    else slideX(g.el, 0);
+  } else {
+    const ok = !cancelled && (g.dy > 90 || (g.dy > 30 && g.dy / dt > 0.45));
+    g.el.style.transition = '';
+    g.el.style.transform = '';
+    if (ok) closeModal();
+  }
+}
+
+document.addEventListener('touchend', e => endGesture(e, false));
+document.addEventListener('touchcancel', e => endGesture(e, true));
+
+/* ================= Маршрутизация ================= */
+
+let lastRoute = null;
+
 function route() {
-  closeModal();
+  closeModal(true);
   view.onclick = view.oninput = view.onchange = null;
+  innerSwipe = null;
+  gesture = null;
+  $('#fab').hidden = true;
+
+  const hash = location.hash || '#/';
+  const [p0, p1] = hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+  const detail = (p0 === 'w' || p0 === 'exercise') && !!p1;
+  const tab = detail ? null : (TABS.find(t => t[0] === p0) || TABS[0])[0];
+
+  // Направление анимации: вкладки — по порядку, вглубь — справа, назад — слева
+  const cur = { key: hash, depth: detail ? 1 : 0, tab };
+  let from = 'f';
+  if (lastRoute && lastRoute.key !== cur.key) {
+    from = !cur.depth && !lastRoute.depth
+      ? (tabIdx(cur.tab) > tabIdx(lastRoute.tab) ? 'r' : 'l')
+      : (cur.depth >= lastRoute.depth ? 'r' : 'l');
+  }
+  const full = swipeNav && from !== 'f';
+  swipeNav = false;
+  lastRoute = cur;
+
+  pageSwipe = detail
+    ? { can: d => d < 0 && !!currentBack, go: () => { swipeNav = true; navigate(currentBack); } }
+    : { can: d => !!TABS[tabIdx(tab) + d], go: d => { swipeNav = true; navigate(TABS[tabIdx(tab) + d][1]); } };
+
   window.scrollTo(0, 0);
-  const [p0, p1] = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
-  if (p0 === 'w' && p1) return renderWorkout(p1);
-  if (p0 === 'exercises') return renderExercises();
-  if (p0 === 'exercise' && p1) return renderExercise(p1);
-  if (p0 === 'stats') return renderStats();
-  if (p0 === 'settings') return renderSettings();
-  renderWorkouts();
+  if (p0 === 'w' && p1) renderWorkout(p1);
+  else if (p0 === 'exercises') renderExercises();
+  else if (p0 === 'exercise' && p1) renderExercise(p1);
+  else if (p0 === 'stats') renderStats();
+  else if (p0 === 'settings') renderSettings();
+  else renderWorkouts();
+  animateIn(view, from, full);
 }
 
 /* ================= Экран: список тренировок ================= */
@@ -235,12 +444,13 @@ function renderWorkouts() {
 
   view.innerHTML = `
     <input class="search" type="search" id="wq" placeholder="🔍 Поиск: упражнение или заметка" value="${esc(workoutsQuery)}">
-    <div id="wlist"></div>
-    <button class="fab" id="newW" aria-label="Новая тренировка">+</button>`;
+    <div id="wlist"></div>`;
 
   const draw = () => { $('#wlist').innerHTML = workoutsListHtml(workoutsQuery); };
   $('#wq').oninput = e => { workoutsQuery = e.target.value; draw(); };
-  $('#newW').onclick = () => { location.hash = '#/w/' + newWorkout().id; };
+  const fab = $('#fab');
+  fab.hidden = false;
+  fab.onclick = () => { location.hash = '#/w/' + newWorkout().id; };
   draw();
 }
 
@@ -327,6 +537,7 @@ function renderWorkout(id) {
           addExercise(w, name);
           save();
           draw();
+          popLast(view, '.ex-card');
           const cards = view.querySelectorAll('.ex-card');
           cards[cards.length - 1]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         });
@@ -336,13 +547,22 @@ function renderWorkout(id) {
         ex.sets.push({ w: last ? last.w : null, r: last ? last.r : null });
         save();
         draw();
+        popLast(view.querySelectorAll('.ex-card')[ei], '.set-row:not(.set-head)');
         break;
       }
-      case 'del-set':
-        ex.sets.splice(si, 1);
-        save();
-        draw();
+      case 'del-set': {
+        const row = b.closest('.set-row');
+        if (row.classList.contains('removing')) break;
+        row.classList.add('removing');
+        const set = ex.sets[si];
+        setTimeout(() => {
+          const idx = ex.sets.indexOf(set);
+          if (idx >= 0) ex.sets.splice(idx, 1);
+          save();
+          draw();
+        }, reduceMotion ? 0 : 170);
         break;
+      }
       case 'fill-prev': {
         const prev = previousEntry(ex.name, w);
         if (prev) { ex.sets = prev.sets.map(s => ({ w: s.w, r: s.r })); save(); draw(); }
@@ -520,24 +740,22 @@ function renderExercise(name) {
   };
   const modes = ['w', 'e'].filter(m => series[m].length >= 2);
 
+  const chartMode = () => modes.includes(exChartMode) ? exChartMode : modes[0];
+  const chartBodyHtml = m => `<div class="muted">${m === 'w'
+    ? 'Максимальный вес по тренировкам, кг'
+    : 'Расчётный 1ПМ по тренировкам, кг — учитывает и вес, и повторы'}</div>${chartSvg(series[m])}`;
   const chartHtml = () => {
     if (!modes.length) return '';
-    const m = modes.includes(exChartMode) ? exChartMode : modes[0];
-    const seg = modes.length > 1
-      ? `<div class="seg">${[['w', 'Макс. вес'], ['e', 'Расч. 1ПМ']].map(([k, l]) =>
-          `<button data-chart="${k}" class="${k === m ? 'on' : ''}">${l}</button>`).join('')}</div>`
-      : '';
-    const caption = m === 'w'
-      ? 'Максимальный вес по тренировкам, кг'
-      : 'Расчётный 1ПМ по тренировкам, кг — учитывает и вес, и повторы';
-    return `<div class="card" id="chartCard">${seg}<div class="muted">${caption}</div>${chartSvg(series[m])}</div>`;
+    const m = chartMode();
+    const seg = modes.length > 1 ? segHtml([['w', 'Макс. вес'], ['e', 'Расч. 1ПМ']], m, 'chart') : '';
+    return `<div class="card">${seg}<div id="chartBody">${chartBodyHtml(m)}</div></div>`;
   };
 
   view.innerHTML = `
     <div class="stats">
       <div class="stat"><div class="stat-v">${best ? esc(setLabel(best)) : '—'}</div><div class="stat-l">Рекорд</div></div>
-      <div class="stat"><div class="stat-v">${best1rm ? fmtNum(Math.round(best1rm * 10) / 10) : '—'}</div><div class="stat-l">Расч. 1ПМ, кг</div></div>
-      <div class="stat"><div class="stat-v">${e.entries.length}</div><div class="stat-l">Тренировок</div></div>
+      <div class="stat"><div class="stat-v" ${best1rm ? `data-count="${Math.round(best1rm * 10) / 10}"` : ''}>${best1rm ? fmtNum(Math.round(best1rm * 10) / 10) : '—'}</div><div class="stat-l">Расч. 1ПМ, кг</div></div>
+      <div class="stat"><div class="stat-v" data-count="${e.entries.length}">${e.entries.length}</div><div class="stat-l">Тренировок</div></div>
     </div>
     ${chartHtml()}
     <h2 class="month">История</h2>
@@ -547,11 +765,15 @@ function renderExercise(name) {
         <div class="chips">${x.sets.map(s => `<span class="chip ${s === best ? 'pr' : ''}">${esc(setLabel(s))}</span>`).join('')}</div>
       </a>`).join('')}`;
 
+  countUp(view);
+
   view.onclick = ev => {
     const b = ev.target.closest('[data-chart]');
-    if (!b) return;
+    if (!b || b.classList.contains('on')) return;
     exChartMode = b.dataset.chart;
-    $('#chartCard').outerHTML = chartHtml();
+    segSelect(b);
+    $('#chartBody').innerHTML = chartBodyHtml(chartMode());
+    animateIn($('#chartBody'), 'f');
   };
 
   $('#renameEx').onclick = () => {
@@ -573,13 +795,13 @@ function chartSvg(pts) {
   if (min === max) { min -= 5; max += 5; }
   const x = i => L + i * (W - L - R) / (pts.length - 1);
   const y = v => T + (max - v) / (max - min) * (H - T - B);
-  const line = pts.map((p, i) => `${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
+  const line = 'M' + pts.map((p, i) => `${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' L');
   return `<svg viewBox="0 0 ${W} ${H}" class="chart">
     <line x1="${L}" y1="${y(max)}" x2="${W - R}" y2="${y(max)}" class="grid"/>
     <line x1="${L}" y1="${y(min)}" x2="${W - R}" y2="${y(min)}" class="grid"/>
     <text x="${L - 6}" y="${y(max) + 4}" text-anchor="end">${fmtNum(max)}</text>
     <text x="${L - 6}" y="${y(min) + 4}" text-anchor="end">${fmtNum(min)}</text>
-    <polyline points="${line}" class="ln"/>
+    <path d="${line}" pathLength="1" class="ln"/>
     ${pts.map((p, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="3"/>`).join('')}
     <text x="${L}" y="${H - 5}">${fmtDateShort(pts[0].date)}</text>
     <text x="${W - R}" y="${H - 5}" text-anchor="end">${fmtDateShort(pts[pts.length - 1].date)}</text>
@@ -725,17 +947,16 @@ function calendarHtml() {
   }
 
   const n = byDay.size;
-  const isCurrent = statsMonth >= today.slice(0, 7);
-  return `<div class="card">
-    <div class="cal-head">
+  return `<div class="cal-head">
       <button class="icon-btn" data-act="month" data-d="-1" aria-label="Предыдущий месяц">‹</button>
-      <div class="cal-title">${esc(monthLabel(statsMonth + '-01'))}
+      <div class="cal-title" id="calTitle">${esc(monthLabel(statsMonth + '-01'))}
         <div class="muted">${n} ${plural(n, 'поход', 'похода', 'походов')}</div></div>
-      <button class="icon-btn" data-act="month" data-d="1" aria-label="Следующий месяц" ${isCurrent ? 'disabled' : ''}>›</button>
+      <button class="icon-btn" data-act="month" data-d="1" aria-label="Следующий месяц" ${calIsCurrent() ? 'disabled' : ''}>›</button>
     </div>
-    <div class="cal">${cells}</div>
-  </div>`;
+    <div class="cal" id="calBody">${cells}</div>`;
 }
+
+const calIsCurrent = () => statsMonth >= todayISO().slice(0, 7);
 
 function progressRowHtml(p) {
   const pct = Math.round(p.pct);
@@ -759,49 +980,74 @@ function renderStats() {
   setTab('stats');
   setHeader('Статистика', null);
 
-  const stat = (v, l) => `<div class="stat"><div class="stat-v">${esc(v)}</div><div class="stat-l">${esc(l)}</div></div>`;
+  const v = visitStats();
+  if (!v.total) {
+    view.innerHTML = `<div class="empty">Здесь появится статистика,<br>когда вы запишете первую тренировку</div>`;
+    return;
+  }
 
-  const draw = () => {
-    const v = visitStats();
-    if (!v.total) {
-      view.innerHTML = `<div class="empty">Здесь появится статистика,<br>когда вы запишете первую тренировку</div>`;
-      return;
-    }
+  const stat = (n, l) => `<div class="stat"><div class="stat-v" data-count="${n}">${fmtNum(n)}</div><div class="stat-l">${esc(l)}</div></div>`;
+
+  const progHtml = () => {
     const prog = progressList(statsPeriod);
-    const recs = recentRecords();
-    view.innerHTML = `
-      <h2 class="month">Походы в зал</h2>
-      <div class="stats two">
-        ${stat(v.week, 'на этой неделе')}
-        ${stat(v.month, 'в этом месяце')}
-        ${stat(fmtNum(Math.round(v.avg * 10) / 10), 'в среднем в неделю')}
-        ${stat(v.streak, `${plural(v.streak, 'неделя', 'недели', 'недель')} подряд · рекорд ${v.bestStreak}`)}
-      </div>
-      ${calendarHtml()}
-
-      <h2 class="month">Прогресс</h2>
-      <div class="seg">${[[30, 'Месяц'], [90, '3 месяца'], [365, 'Год']].map(([d, l]) =>
-        `<button data-act="period" data-p="${d}" class="${d === statsPeriod ? 'on' : ''}">${l}</button>`).join('')}</div>
-      ${prog.length
-        ? `<div class="card list">${prog.map(progressRowHtml).join('')}</div>
-           <div class="footnote">Начало периода против последней тренировки. % — по расчётному 1ПМ, он учитывает и вес, и повторы.</div>`
-        : `<div class="empty small">Нужно хотя бы две тренировки с одним упражнением, и последняя — в выбранном периоде</div>`}
-
-      ${recs.length ? `<h2 class="month">Последние рекорды</h2><div class="card list">${recs.map(recordRowHtml).join('')}</div>` : ''}`;
+    return prog.length
+      ? `<div class="card list">${prog.map(progressRowHtml).join('')}</div>
+         <div class="footnote">Начало периода против последней тренировки. % — по расчётному 1ПМ, он учитывает и вес, и повторы.</div>`
+      : `<div class="empty small">Нужно хотя бы две тренировки с одним упражнением, и последняя — в выбранном периоде</div>`;
   };
-  draw();
+  const recs = recentRecords();
+
+  view.innerHTML = `
+    <h2 class="month">Походы в зал</h2>
+    <div class="stats two">
+      ${stat(v.week, 'на этой неделе')}
+      ${stat(v.month, 'в этом месяце')}
+      ${stat(Math.round(v.avg * 10) / 10, 'в среднем в неделю')}
+      ${stat(v.streak, `${plural(v.streak, 'неделя', 'недели', 'недель')} подряд · рекорд ${v.bestStreak}`)}
+    </div>
+    <div class="card cal-card" id="calCard">${calendarHtml()}</div>
+    <div class="footnote center">Листайте месяцы свайпом по календарю</div>
+
+    <h2 class="month">Прогресс</h2>
+    ${segHtml([[30, 'Месяц'], [90, '3 месяца'], [365, 'Год']], statsPeriod, 'p')}
+    <div id="progBox">${progHtml()}</div>
+
+    ${recs.length ? `<h2 class="month">Последние рекорды</h2><div class="card list">${recs.map(recordRowHtml).join('')}</div>` : ''}`;
+
+  countUp(view);
+
+  /** Смена месяца в календаре: стрелками или свайпом (тогда месяц въезжает целиком). */
+  const changeMonth = (d, bySwipe) => {
+    if (d > 0 && calIsCurrent()) return;
+    const [y, m] = statsMonth.split('-').map(Number);
+    statsMonth = isoOf(new Date(y, m - 1 + d, 1)).slice(0, 7);
+    $('#calCard').innerHTML = calendarHtml();
+    animateIn($('#calBody'), d > 0 ? 'r' : 'l', bySwipe);
+    restartAnim($('#calTitle'), 'tfade');
+  };
+
+  innerSwipe = {
+    area: '#calCard',
+    body: '#calBody',
+    can: d => d < 0 || !calIsCurrent(),
+    go: d => changeMonth(d, true),
+  };
 
   view.onclick = e => {
+    const p = e.target.closest('[data-p]');
+    if (p) {
+      if (p.classList.contains('on')) return;
+      statsPeriod = +p.dataset.p;
+      segSelect(p);
+      $('#progBox').innerHTML = progHtml();
+      animateIn($('#progBox'), 'f');
+      return;
+    }
     const b = e.target.closest('[data-act]');
     if (!b) return;
     const act = b.dataset.act;
-    if (act === 'period') {
-      statsPeriod = +b.dataset.p;
-      draw();
-    } else if (act === 'month') {
-      const [y, m] = statsMonth.split('-').map(Number);
-      statsMonth = isoOf(new Date(y, m - 1 + Number(b.dataset.d), 1)).slice(0, 7);
-      draw();
+    if (act === 'month') {
+      changeMonth(Number(b.dataset.d), false);
     } else if (act === 'day') {
       const list = sortedWorkouts().filter(w => w.date === b.dataset.date && w.exercises.length);
       if (list.length === 1) { location.hash = '#/w/' + list[0].id; return; }

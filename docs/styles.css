@@ -159,12 +159,24 @@ textarea { resize: vertical; }
 
 /* ---------- Статистика ---------- */
 .stats.two { grid-template-columns: repeat(2, 1fr); }
-.seg { display: flex; background: var(--card2); border-radius: 10px; padding: 3px; margin-bottom: 10px; }
+.seg {
+  position: relative; display: flex; background: var(--card2);
+  border-radius: 10px; padding: 3px; margin-bottom: 10px;
+}
+.seg-ind {
+  position: absolute; top: 3px; bottom: 3px; left: 3px;
+  width: calc((100% - 6px) / var(--n));
+  transform: translateX(calc(100% * var(--i)));
+  background: var(--accent); border-radius: 8px;
+  transition: transform .3s var(--ease);
+}
 .seg button {
+  position: relative; z-index: 1;
   flex: 1; background: none; border: none; color: var(--muted);
   padding: 7px 4px; border-radius: 8px; font-size: 14px; cursor: pointer;
+  transition: color .25s;
 }
-.seg button.on { background: var(--accent); color: #111; font-weight: 600; }
+.seg button.on { color: #111; font-weight: 600; }
 .card .seg { margin-bottom: 8px; }
 
 .cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
@@ -194,25 +206,42 @@ textarea { resize: vertical; }
 .prog-pct.down { color: var(--danger); }
 .empty.small { padding: 16px; font-size: 14px; }
 .footnote { font-size: 12px; color: var(--muted); margin: -2px 4px 10px; }
+.footnote.center { text-align: center; margin-top: -4px; }
+.cal-card { overflow: hidden; touch-action: pan-y; }
 
 /* ---------- Модальные окна ---------- */
 #modal {
   position: fixed; inset: 0; z-index: 50;
-  background: rgba(0, 0, 0, .55);
+  background: rgba(0, 0, 0, 0);
   display: flex; align-items: flex-end;
+  transition: background-color .28s;
 }
+#modal.open { background: rgba(0, 0, 0, .55); }
 .sheet {
   background: var(--card); width: 100%; max-width: 640px; margin: 0 auto;
   border-radius: 18px 18px 0 0;
   padding: 16px 14px calc(16px + env(safe-area-inset-bottom));
   max-height: 85vh; overflow: auto;
+  transform: translateY(100%);
+  transition: transform .3s var(--ease);
+  will-change: transform;
 }
+.sheet::before {
+  content: ''; display: block; width: 38px; height: 5px; border-radius: 3px;
+  background: var(--line); margin: -6px auto 10px;
+}
+#modal.open .sheet { transform: none; }
 #modal.top { align-items: flex-start; }
 #modal.top .sheet {
   border-radius: 0 0 18px 18px;
   padding-top: calc(16px + env(safe-area-inset-top));
   max-height: 60vh;
+  transform: translateY(-100%);
+  display: flex; flex-direction: column;
 }
+#modal.top .sheet::before { order: 99; margin: 10px auto -6px; }
+#modal.top.open .sheet { transform: none; }
+#modal.top .sug { overflow: auto; min-height: 0; }
 .sheet-title { font-weight: 600; font-size: 17px; margin-bottom: 10px; text-align: center; }
 .sug { display: flex; flex-direction: column; }
 .sug-item {
@@ -220,3 +249,56 @@ textarea { resize: vertical; }
   padding: 13px 4px; font-size: 16px; color: var(--text);
 }
 .sug-item.add { color: var(--accent); font-weight: 600; }
+
+/* ---------- Анимации ---------- */
+:root { --ease: cubic-bezier(.2, .8, .2, 1); }
+
+@keyframes in-r { from { opacity: 0; transform: translateX(28px); } }
+@keyframes in-l { from { opacity: 0; transform: translateX(-28px); } }
+@keyframes in-r-full { from { transform: translateX(100%); } }
+@keyframes in-l-full { from { transform: translateX(-100%); } }
+@keyframes in-f { from { opacity: 0; transform: translateY(6px); } }
+@keyframes fade { from { opacity: 0; } }
+@keyframes pop { from { opacity: 0; transform: scale(.94); } }
+@keyframes removing { to { opacity: 0; transform: translateX(30px); } }
+@keyframes draw { from { stroke-dashoffset: 1; } }
+
+.in-r { animation: in-r .3s var(--ease); }
+.in-l { animation: in-l .3s var(--ease); }
+.in-r.full { animation: in-r-full .28s var(--ease); }
+.in-l.full { animation: in-l-full .28s var(--ease); }
+.in-f { animation: in-f .25s var(--ease); }
+.tfade { animation: fade .25s ease-out; }
+.pop { animation: pop .25s var(--ease); }
+.set-row.removing { animation: removing .17s ease-in forwards; pointer-events: none; }
+
+/* График «рисуется», точки появляются после линии */
+.chart .ln { stroke-dasharray: 1; animation: draw .8s var(--ease); }
+.chart circle { animation: fade .3s .55s backwards; }
+
+/* Карточки списка появляются по очереди */
+#wlist > .card, #elist > .card { animation: in-f .3s var(--ease) backwards; }
+#wlist > :nth-child(2), #elist > :nth-child(2) { animation-delay: .03s; }
+#wlist > :nth-child(3), #elist > :nth-child(3) { animation-delay: .06s; }
+#wlist > :nth-child(4), #elist > :nth-child(4) { animation-delay: .09s; }
+#wlist > :nth-child(5), #elist > :nth-child(5) { animation-delay: .12s; }
+#wlist > :nth-child(6), #elist > :nth-child(6) { animation-delay: .15s; }
+#wlist > :nth-child(n+7), #elist > :nth-child(n+7) { animation-delay: .18s; }
+
+/* Отклик на нажатие */
+.btn, .card, .fab, .cal-day.has, .icon-btn, .sug-item, #tabbar a {
+  transition: transform .15s var(--ease), opacity .15s, background-color .15s;
+}
+.btn:active, a.card:active, .cal-day.has:active { transform: scale(.97); }
+.fab:active { transform: scale(.9); }
+.icon-btn:active, .sug-item:active { opacity: .5; }
+#tabbar a:active { transform: scale(.88); }
+#tabbar a.active { animation: pop .25s var(--ease); }
+.fab:not([hidden]) { animation: pop .3s var(--ease); }
+
+#view { touch-action: pan-y; }
+html, body { overflow-x: hidden; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
