@@ -188,7 +188,7 @@ function setHeader(title, backHash, rightHtml = '') {
   currentBack = backHash;
   const b = $('#backBtn');
   b.hidden = !backHash;
-  b.onclick = () => { location.hash = backHash; };
+  b.onclick = () => goBack(backHash);
   $('#topRight').innerHTML = rightHtml;
 }
 
@@ -256,7 +256,7 @@ function popLast(root, sel) {
 
 /** Цифры «набегают» от 0 до значения из data-count. */
 function countUp(root) {
-  if (reduceMotion) return;
+  if (reduceMotion || navBack) return;
   root.querySelectorAll('[data-count]').forEach(el => {
     const target = Number(el.dataset.count);
     if (!target) return;
@@ -302,6 +302,19 @@ let gesture = null;
 
 function navigate(hash) {
   if (location.hash === hash) route(); else location.hash = hash;
+}
+
+/** «Назад» — на тот экран, откуда пришли. Если истории нет (после перезапуска) — на fallback. */
+function goBack(fallback) {
+  if (curIdx > 0 && pageKey[curIdx - 1]) history.back();
+  else if (fallback) navigate(fallback);
+}
+
+/** Переход без новой записи в истории: «назад» с нового экрана ведёт туда же, куда вёл бы со старого. */
+function replaceRoute(hash) {
+  if (location.hash === hash) { route(); return; }
+  replaceNav = true;
+  location.replace(hash);
 }
 
 function slideX(el, x, after) {
@@ -391,7 +404,18 @@ document.addEventListener('touchcancel', e => endGesture(e, true));
 
 let lastRoute = null;
 
+// История переходов: каждая запись браузерной истории помечена номером (history.state.idx).
+// По номеру запоминаем адрес, прокрутку и вкладку, из которой открыт экран.
+let curIdx = null;
+let replaceNav = false;
+let navBack = false;     // текущий переход — возврат назад
+const pageKey = {};
+const pageY = {};
+const pageTab = {};
+if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+
 function route() {
+  if (curIdx !== null) pageY[curIdx] = window.scrollY;
   closeModal(true);
   view.onclick = view.oninput = view.onchange = null;
   innerSwipe = null;
@@ -403,11 +427,32 @@ function route() {
   const detail = (p0 === 'w' || p0 === 'exercise') && !!p1;
   const tab = detail ? null : (TABS.find(t => t[0] === p0) || TABS[0])[0];
 
+  // Какая это запись истории: уже известная (назад/вперёд/перезагрузка) или новая
+  const st = history.state;
+  let restoreY = null;
+  navBack = false;
+  if (st && typeof st.idx === 'number') {
+    navBack = curIdx !== null && st.idx < curIdx;
+    restoreY = pageKey[st.idx] === hash ? pageY[st.idx] ?? null : null;
+    curIdx = st.idx;
+  } else {
+    curIdx = curIdx === null ? 0 : replaceNav ? curIdx : curIdx + 1;
+    history.replaceState({ idx: curIdx }, '');
+  }
+  replaceNav = false;
+  pageKey[curIdx] = hash;
+  // Вкладка, которая подсвечена внизу: для тренировки/упражнения — та, из которой их открыли
+  const navTab = detail
+    ? (pageKey[curIdx - 1] && pageTab[curIdx - 1]) || (p0 === 'w' ? 'workouts' : 'exercises')
+    : tab;
+  pageTab[curIdx] = navTab;
+
   // Направление анимации: вкладки — по порядку, вглубь — справа, назад — слева
   const cur = { key: hash, depth: detail ? 1 : 0, tab };
   let from = 'f';
   if (lastRoute && lastRoute.key !== cur.key) {
-    from = !cur.depth && !lastRoute.depth
+    if (navBack) from = 'l';
+    else from = !cur.depth && !lastRoute.depth
       ? (tabIdx(cur.tab) > tabIdx(lastRoute.tab) ? 'r' : 'l')
       : (cur.depth >= lastRoute.depth ? 'r' : 'l');
   }
@@ -416,7 +461,7 @@ function route() {
   lastRoute = cur;
 
   pageSwipe = detail
-    ? { can: d => d < 0 && !!currentBack, go: () => { swipeNav = true; navigate(currentBack); } }
+    ? { can: d => d < 0 && !!currentBack, go: () => { swipeNav = true; goBack(currentBack); } }
     : { can: d => !!TABS[tabIdx(tab) + d], go: d => { swipeNav = true; navigate(TABS[tabIdx(tab) + d][1]); } };
 
   window.scrollTo(0, 0);
@@ -426,7 +471,10 @@ function route() {
   else if (p0 === 'stats') renderStats();
   else if (p0 === 'settings') renderSettings();
   else renderWorkouts();
+  if ((location.hash || '#/') !== hash) return; // экран сам перенаправил на другой адрес
+  setTab(navTab);
   animateIn(view, from, full);
+  if (restoreY) window.scrollTo(0, restoreY);
 }
 
 /* ================= Экран: список тренировок ================= */
@@ -450,7 +498,7 @@ function renderWorkouts() {
   $('#wq').oninput = e => { workoutsQuery = e.target.value; draw(); };
   const fab = $('#fab');
   fab.hidden = false;
-  fab.onclick = () => { location.hash = '#/w/' + newWorkout().id; };
+  fab.onclick = () => navigate('#/w/' + newWorkout().id);
   draw();
 }
 
@@ -488,7 +536,7 @@ function workoutsListHtml(q) {
 
 function renderWorkout(id) {
   const w = getWorkout(id);
-  if (!w) { location.hash = '#/'; return; }
+  if (!w) { replaceRoute('#/'); return; }
   setTab('workouts');
   setHeader(fmtDate(w.date), '#/');
 
@@ -572,13 +620,13 @@ function renderWorkout(id) {
         exerciseMenu(w, ei, draw);
         break;
       case 'repeat':
-        location.hash = '#/w/' + repeatWorkout(w).id;
+        replaceRoute('#/w/' + repeatWorkout(w).id);
         break;
       case 'del-w':
         if (confirm('Удалить эту тренировку?')) {
           db.workouts = db.workouts.filter(x => x !== w);
           save();
-          location.hash = '#/';
+          goBack('#/');
         }
         break;
     }
@@ -723,7 +771,7 @@ let exChartMode = 'w';
 function renderExercise(name) {
   setTab('exercises');
   const e = exerciseIndex().get(keyOf(name));
-  if (!e) { location.hash = '#/exercises'; return; }
+  if (!e) { replaceRoute('#/exercises'); return; }
   setHeader(e.name, '#/exercises', `<button class="icon-btn" id="renameEx">Изм.</button>`);
 
   const all = e.entries.flatMap(x => x.sets);
@@ -784,7 +832,7 @@ function renderExercise(name) {
     }
     save();
     const target = '#/exercise/' + encodeURIComponent(nn.trim());
-    if (location.hash === target) route(); else location.hash = target;
+    replaceRoute(target);
   };
 }
 
@@ -1050,7 +1098,7 @@ function renderStats() {
       changeMonth(Number(b.dataset.d), false);
     } else if (act === 'day') {
       const list = sortedWorkouts().filter(w => w.date === b.dataset.date && w.exercises.length);
-      if (list.length === 1) { location.hash = '#/w/' + list[0].id; return; }
+      if (list.length === 1) { navigate('#/w/' + list[0].id); return; }
       openModal(`<div class="sheet-title">${esc(fmtDate(b.dataset.date))}</div>` +
         list.map(w => `<a class="card" href="#/w/${w.id}"><div class="muted">${esc(w.exercises.map(x => x.name).join(' · '))}</div></a>`).join(''));
     }
